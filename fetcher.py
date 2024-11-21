@@ -12,7 +12,7 @@ import os
 import sys
 import importlib.util
 
-def load_plugin(plugin_name, command, item_id=None):
+def load_plugin(plugin_name, command, item_id):
     """Load and execute the plugin"""
     try:
         # Import the plugin module
@@ -23,12 +23,28 @@ def load_plugin(plugin_name, command, item_id=None):
 
         if command == 'check':
             plugin.check_connection()
+        elif command == 'update':
+            if ' ' not in item_id:
+                print("Usage: ./fetcher.py github update <field> <value>")
+                print("Supported fields: name, bio, location, company, blog")
+                return
+            field, value = item_id.split(' ', 1)  # Split only on first space
+            if field == 'repo':
+                if ' ' not in value:
+                    print("Usage: ./fetcher.py github update repo <owner/repo> <description>")
+                    return
+                repo_name, description = value.split(' ', 1)
+                plugin.update_repo(repo_name, description)
+            else:
+                plugin.update_profile(field, value)
         else:
             plugin.fetch_info(command, item_id)  # command is the type here
     except FileNotFoundError:
         print(f"Plugin '{plugin_name}' not found.")
     except AttributeError:
-        print(f"Plugin '{plugin_name}' does not implement the required function.")
+        print(f"Plugin '{plugin_name}' doesn't support this operation.")
+    except Exception as e:
+        print(f"Error: {str(e)}")
 
 def show_usage():
     """Show usage information"""
@@ -41,6 +57,7 @@ def show_usage():
     print("  fetcher trello board 67890  # Fetch board")
     print("  fetcher trello list 11111   # Fetch list")
     print("  fetcher trello check        # Check connection")
+    print("  fetcher github update name Carlos")
 
 def main():
     if len(sys.argv) < 3:
@@ -53,6 +70,13 @@ def main():
     if second_arg == 'check':
         command = 'check'
         item_id = None
+    elif second_arg == 'update':
+        if len(sys.argv) == 3:
+            print("Usage: ./fetcher.py github update <field> <value>")
+            print("Supported fields: name, bio, location, company, blog")
+            sys.exit(1)
+        command = 'update'
+        item_id = ' '.join(sys.argv[3:])
     else:
         if len(sys.argv) == 3:
             # Just ID provided, use default type (card)
