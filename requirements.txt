@@ -1,2 +1,4 @@
 python-dotenv==1.0.0
 requests==2.31.0
+importlib-metadata==6.8.0  # Para importlib
+urllib3==2.1.0  # Dependência do requests e usado diretamente
