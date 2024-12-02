@@ -9,6 +9,8 @@ Commands:
     board - Get board information: board [board_id]
     card - Get card information: card [card_id]
     list - Get list information: list [list_id]
+    add_comment - Add a comment to a card: add_comment [card_id] [comment]
+    move_card - Move a card to a different list: move_card [card_id] [list_id]
 """
 
 import os
@@ -31,7 +33,9 @@ class Plugin(PluginInterface):
             "boards": "List all boards",
             "board": "Get board information: board [board_id]",
             "card": "Get card information: card [card_id]",
-            "list": "Get list information: list [list_id]"
+            "list": "Get list information: list [list_id]",
+            "add_comment": "Add a comment to a card: add_comment [card_id] [comment]",
+            "move_card": "Move a card to a different list: move_card [card_id] [list_id]"
         }
 
     def list_commands(self):
@@ -56,6 +60,42 @@ class Plugin(PluginInterface):
             return response.json()
         else:
             print(f"Error fetching data from {url}: {response.status_code}")
+            if response.status_code == 401:
+                print("Authentication error. Please check if TRELLO_API_KEY and TRELLO_TOKEN environment variables are properly set.")
+            return None
+
+    def post(self, endpoint, data=None):
+        """Make a POST request to Trello API."""
+        url = f"{self.base_url}/{endpoint}"
+        default_params = {
+            'key': self.api_key,
+            'token': self.token
+        }
+        
+        response = requests.post(url, params=default_params, json=data)
+        
+        if response.status_code in [200, 201]:
+            return response.json()
+        else:
+            print(f"Error posting data to {url}: {response.status_code}")
+            if response.status_code == 401:
+                print("Authentication error. Please check if TRELLO_API_KEY and TRELLO_TOKEN environment variables are properly set.")
+            return None
+
+    def put(self, endpoint, data=None):
+        """Make a PUT request to Trello API."""
+        url = f"{self.base_url}/{endpoint}"
+        default_params = {
+            'key': self.api_key,
+            'token': self.token
+        }
+        
+        response = requests.put(url, params=default_params, json=data)
+        
+        if response.status_code in [200, 201]:
+            return response.json()
+        else:
+            print(f"Error updating data at {url}: {response.status_code}")
             if response.status_code == 401:
                 print("Authentication error. Please check if TRELLO_API_KEY and TRELLO_TOKEN environment variables are properly set.")
             return None
@@ -127,6 +167,22 @@ class Plugin(PluginInterface):
             return list_data
         return None
 
+    def add_comment_to_card(self, card_id, comment):
+        """Add a comment to a card."""
+        response = self.post(f"cards/{card_id}/actions/comments", {"text": comment})
+        if response:
+            print(f"\nComment added successfully to card {card_id}")
+            return True
+        return False
+
+    def move_card(self, card_id, list_id):
+        """Move a card to a different list."""
+        response = self.put(f"cards/{card_id}", {"idList": list_id})
+        if response:
+            print(f"\nCard moved successfully to list {list_id}")
+            return True
+        return False
+
     def test(self):
         """Run basic plugin tests."""
         print("Testing Trello plugin...")
@@ -159,6 +215,16 @@ class Plugin(PluginInterface):
                 print("Usage: list [list_id]")
                 return
             self.get_list_info(args[0])
+        elif command == "add_comment":
+            if len(args) < 2:
+                print("Usage: add_comment [card_id] [comment]")
+                return
+            self.add_comment_to_card(args[0], args[1])
+        elif command == "move_card":
+            if len(args) < 2:
+                print("Usage: move_card [card_id] [list_id]")
+                return
+            self.move_card(args[0], args[1])
         else:
             print(f"Unknown command: {command}")
             self.list_commands()
