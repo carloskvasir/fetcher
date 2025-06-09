@@ -1,0 +1,116 @@
+{
+  "name": "fetcher-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for Fetcher - Access multiple services (GitHub, Spotify, Trello) through MCP protocol",
+  "author": "Carlos Lima",
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/carloskvasir/fetcher.git"
+  },
+  "mcp": {
+    "server": {
+      "command": "python3",
+      "args": ["mcp_server.py"],
+      "env": {
+        "PYTHONPATH": "."
+      }
+    },
+    "capabilities": {
+      "tools": true,
+      "resources": false,
+      "prompts": false
+    }
+  },
+  "tools": [
+    {
+      "name": "github_test",
+      "description": "Test GitHub connection and authentication"
+    },
+    {
+      "name": "github_me",
+      "description": "Show authenticated GitHub user information"
+    },
+    {
+      "name": "github_list",
+      "description": "List repositories for a GitHub user"
+    },
+    {
+      "name": "github_search",
+      "description": "Search GitHub repositories"
+    },
+    {
+      "name": "spotify_test",
+      "description": "Test Spotify connection and authentication"
+    },
+    {
+      "name": "spotify_me",
+      "description": "Show Spotify user profile"
+    },
+    {
+      "name": "spotify_search",
+      "description": "Search for tracks, artists, or albums on Spotify"
+    },
+    {
+      "name": "spotify_playlists",
+      "description": "Show user's Spotify playlists"
+    },
+    {
+      "name": "spotify_playlist",
+      "description": "Show specific playlist details"
+    },
+    {
+      "name": "spotify_top",
+      "description": "Show top tracks or artists"
+    },
+    {
+      "name": "spotify_recent",
+      "description": "Show recently played tracks"
+    },
+    {
+      "name": "spotify_recommendations",
+      "description": "Get personalized music recommendations"
+    },
+    {
+      "name": "spotify_charts",
+      "description": "Show top charts for a country"
+    },
+    {
+      "name": "trello_test",
+      "description": "Test Trello connection and authentication"
+    },
+    {
+      "name": "trello_boards",
+      "description": "List all Trello boards"
+    },
+    {
+      "name": "trello_board",
+      "description": "Get Trello board information"
+    },
+    {
+      "name": "trello_card",
+      "description": "Get Trello card information"
+    },
+    {
+      "name": "trello_list",
+      "description": "Get Trello list information"
+    }
+  ],
+  "plugins": [
+    {
+      "name": "github",
+      "description": "GitHub integration plugin",
+      "commands": ["test", "me", "list", "search"]
+    },
+    {
+      "name": "spotify",
+      "description": "Spotify integration plugin", 
+      "commands": ["test", "me", "search", "playlists", "playlist", "create-playlist", "edit-playlist", "add-to-playlist", "top", "recent", "recommendations", "charts"]
+    },
+    {
+      "name": "trello",
+      "description": "Trello integration plugin",
+      "commands": ["test", "boards", "board", "card", "list"]
+    }
+  ]
+}
