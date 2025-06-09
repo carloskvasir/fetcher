@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "fetcher": {
+      "command": "python3",
+      "args": ["/home/carlos/github/fetcher/mcp_server.py"],
+      "env": {
+        "PYTHONPATH": "/home/carlos/github/fetcher"
+      }
+    }
+  }
+}

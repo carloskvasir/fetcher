@@ -3,21 +3,27 @@ Spotify Plugin for Fetcher - Simplified Version
 Just run 'spotify me' to see your profile
 """
 
-import os
-import json
-import requests
 import base64
-import webbrowser
+import getpass
 import http.server
-import socketserver
-import urllib.parse
-from threading import Thread
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
-from .plugin_interface import PluginInterface
-import threading
+import json
+import os
+import re
 import socket
+import socketserver
+import threading
 import time
+import urllib.parse
+import uuid
+import webbrowser
+from datetime import datetime, timedelta
+from threading import Thread
+
+import psutil
+import requests
+from dotenv import load_dotenv
+
+from .plugin_interface import PluginInterface
 
 # Load environment variables
 load_dotenv()
@@ -33,6 +39,7 @@ class Plugin(PluginInterface):
         self.client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
         self.access_token = os.getenv('SPOTIFY_ACCESS_TOKEN')
         self.token_expiry = os.getenv('SPOTIFY_TOKEN_EXPIRY')
+        self.client_token = os.getenv('SPOTIFY_CLIENT_TOKEN')  # Add client token
         
         if not self.client_id or not self.client_secret:
             raise ValueError(
@@ -59,7 +66,8 @@ class Plugin(PluginInterface):
             "following": "Show artists you are following",
             "recommendations": "Get track recommendations based on seed tracks or artists",
             "test": "Test the Spotify plugin authentication",
-            "charts": "Show top charts: charts [country] [limit] (e.g., brazil 50)"
+            "charts": "Show top charts: charts [country] [limit] (e.g., brazil 50)",
+            "set-name": "Change your Spotify display name: set-name [new_name]"
         }
             
     def _save_token_to_env(self, access_token, expires_in):
@@ -105,164 +113,268 @@ class Plugin(PluginInterface):
         except (ValueError, TypeError):
             return False
 
-    def _get_auth_code(self):
-        """Get authorization code via browser."""
-        scopes = [
-            'user-read-private',
-            'user-read-email',
-            'user-top-read',
-            'user-read-recently-played',
-            'playlist-read-private',
-            'playlist-modify-public',
-            'user-follow-read'
-        ]
-        
-        auth_params = {
-            'client_id': self.client_id,
-            'response_type': 'code',
-            'redirect_uri': self.redirect_uri,
-            'scope': ' '.join(scopes)
-        }
-        auth_code = [None]
-        server = None
-        port = 3003  # Porta fixa
-
-        class Handler(http.server.SimpleHTTPRequestHandler):
+    def _start_auth_server(self):
+        """Start local server to receive OAuth callback."""
+        class CallbackHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                nonlocal auth_code
-                query = urllib.parse.urlparse(self.path).query
-                params = urllib.parse.parse_qs(query)
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
                 
-                if 'code' in params:
-                    auth_code[0] = params['code'][0]
-                    self.send_response(200)
-                    self.send_header('Content-type', 'text/html')
-                    self.end_headers()
-                    response_html = f"""
-                    <html>
-                        <body style="font-family: Arial, sans-serif; padding: 20px; text-align: center;">
-                            <h2 style="color: #1DB954;">✅ Authentication Successful!</h2>
-                            <p>You can close this window and return to the terminal.</p>
-                        </body>
-                    </html>
+                query_components = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                
+                if 'code' in query_components:
+                    # Store the auth code
+                    self.server.auth_code = query_components['code'][0]
+                    response = """
+                    <html><body>
+                        <h1>✅ Autorização concluída!</h1>
+                        <p>Você pode fechar esta janela e voltar ao terminal.</p>
+                    </body></html>
                     """
-                    self.wfile.write(response_html.encode())
-                    threading.Timer(0.5, server.shutdown).start()
-                elif 'error' in params:
-                    self.send_response(400)
-                    self.send_header('Content-type', 'text/html')
-                    self.end_headers()
-                    error_msg = params['error'][0]
-                    error_desc = params.get('error_description', [''])[0]
-                    response_html = f"""
-                    <html>
-                        <body style="font-family: Arial, sans-serif; padding: 20px; text-align: center;">
-                            <h2 style="color: #E21B3C;">❌ Authentication Error</h2>
-                            <p>Error: {error_msg}</p>
-                            <p>Description: {error_desc}</p>
-                        </body>
-                    </html>
+                else:
+                    response = """
+                    <html><body>
+                        <h1>❌ Erro na autorização</h1>
+                        <p>Por favor, tente novamente.</p>
+                    </body></html>
                     """
-                    self.wfile.write(response_html.encode())
-                    threading.Timer(0.5, server.shutdown).start()
-            
+                
+                self.wfile.write(response.encode())
+                
             def log_message(self, format, *args):
+                # Desabilita logs do servidor HTTP
                 pass
+
+        port = 3003  # Porta fixa que está configurada no Spotify Developer Dashboard
+        self.redirect_uri = f"http://127.0.0.1:{port}/callback"
+        
+        # Tentar matar qualquer processo que esteja usando a porta
+        try:
+            import psutil
+            for proc in psutil.process_iter():
+                try:
+                    connections = proc.connections()
+                    for conn in connections:
+                        if hasattr(conn, 'laddr') and isinstance(conn.laddr, tuple) and len(conn.laddr) >= 2:
+                            if conn.laddr[1] == port:
+                                print(f"\n🔄 Finalizando processo anterior na porta {port}...")
+                                proc.terminate()
+                                time.sleep(1)  # Esperar processo terminar
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+        except Exception as e:
+            # Se psutil falhar, tentar socket
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('127.0.0.1', port))
+                    s.close()
+            except socket.error:
+                print(f"\n⚠️ A porta {port} está em uso. Por favor, aguarde um momento e tente novamente.")
+                time.sleep(5)  # Dar tempo para o processo anterior terminar
         
         try:
-            server = socketserver.TCPServer(('127.0.0.1', port), Handler)
-            server.allow_reuse_address = True
+            # Create server
+            server = socketserver.TCPServer(("127.0.0.1", port), CallbackHandler)
+            server.auth_code = None
+            server.allow_reuse_address = True  # Permite reusar a porta se ela ainda estiver em TIME_WAIT
+            
+            # Start server in a thread
             server_thread = Thread(target=server.serve_forever)
             server_thread.daemon = True
             server_thread.start()
             
-            auth_url = f"{self.authorize_url}?{urllib.parse.urlencode(auth_params)}"
-            
-            print("\nIMPORTANT: Before proceeding, make sure you have configured your Spotify App:")
-            print("1. Go to https://developer.spotify.com/dashboard")
-            print("2. Select your app")
-            print("3. Click 'Settings'")
-            print("4. Under 'Redirect URIs', add EXACTLY this URI:")
-            print(f"   {self.redirect_uri}")
-            print("5. Click 'Save' at the bottom\n")
-            
-            print("Opening browser for Spotify login...")
-            webbrowser.open(auth_url)
-            
-            while auth_code[0] is None:
-                time.sleep(1)
-            
-            return auth_code[0]
+            return server
             
         except Exception as e:
-            print(f"\n❌ Error starting local server: {str(e)}")
+            print(f"\n❌ Erro ao iniciar servidor: {str(e)}")
+            if "Address already in use" in str(e):
+                print("\nDica: Tente novamente em alguns segundos")
             return None
-        finally:
-            if server:
-                server.server_close()
 
-    def _get_access_token(self, auth_code=None):
-        """Get access token using authorization code or refresh existing."""
-        # Verificar se já temos um token válido
-        if self._is_token_valid():
-            return self.access_token
-
-        auth_header = base64.b64encode(
-            f"{self.client_id}:{self.client_secret}".encode()
-        ).decode()
-
+    def _get_user_auth(self):
+        """Get user authorization through OAuth flow."""
+        print("\n🔄 Iniciando fluxo de autorização...")
+        
+        # Start local server
+        try:
+            server = self._start_auth_server()
+        except Exception as e:
+            print(f"\n❌ Erro ao iniciar servidor local: {str(e)}")
+            return None
+        
+        # Build authorization URL
+        # Escopos oficiais do Spotify: https://developer.spotify.com/documentation/web-api/concepts/scopes
+        scope = (
+            "user-read-private "           # Ler perfil privado
+            "user-read-email "             # Ler email
+            "user-read-currently-playing "  # Ler música atual
+            "playlist-read-private "        # Ler playlists privadas
+            "playlist-modify-public "       # Modificar playlists públicas
+            "playlist-modify-private "      # Modificar playlists privadas
+            "user-read-playback-state "     # Ler estado do player
+            "user-modify-playback-state "   # Controlar player
+            "user-read-recently-played "    # Ler músicas recentes
+            "user-top-read "               # Ler top artistas/músicas
+            "user-follow-read "            # Ler quem você segue
+            "user-follow-modify"           # Seguir/deixar de seguir
+        ).strip()
+        
+        params = {
+            'client_id': self.client_id,
+            'response_type': 'code',
+            'redirect_uri': self.redirect_uri,
+            'scope': scope,
+            'show_dialog': 'true'  # Força mostrar diálogo de autorização
+        }
+        auth_url = f"{self.authorize_url}?{urllib.parse.urlencode(params)}"
+        
+        print(f"\nDebug info:")
+        print(f"Client ID: {self.client_id}")
+        print(f"Redirect URI: {self.redirect_uri}")
+        print(f"Scopes: {scope}")
+        print(f"Auth URL: {auth_url}")
+        
+        # Open browser for auth
+        print("\n🌐 Abrindo navegador para autorização...")
+        webbrowser.open(auth_url)
+        
+        # Wait for callback
+        start_time = time.time()
+        while not server.auth_code and time.time() - start_time < 300:  # 5 min timeout
+            time.sleep(1)
+        
+        # Shutdown server
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception as e:
+            print(f"\n⚠️ Erro ao fechar servidor: {str(e)}")
+        
+        if not server.auth_code:
+            print("\n❌ Timeout na autorização")
+            return None
+            
+        # Exchange code for tokens
+        print("\n🔄 Obtendo tokens...")
+        auth = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
         headers = {
-            'Authorization': f'Basic {auth_header}',
+            'Authorization': f'Basic {auth}',
             'Content-Type': 'application/x-www-form-urlencoded'
         }
-
-        if auth_code:
-            data = {
-                'grant_type': 'authorization_code',
-                'code': auth_code,
-                'redirect_uri': self.redirect_uri
-            }
-        else:
-            print("\n🔑 Starting Spotify authorization...")
-            new_auth_code = self._get_auth_code()
-            if not new_auth_code:
-                print("❌ Authorization failed")
-                return None
-            return self._get_access_token(new_auth_code)
-
+        data = {
+            'grant_type': 'authorization_code',
+            'code': server.auth_code,
+            'redirect_uri': self.redirect_uri
+        }
+        
         try:
-            response = requests.post(self.auth_url, headers=headers, data=data)
-            response.raise_for_status()
+            response = requests.post('https://accounts.spotify.com/api/token', headers=headers, data=data)
+            print(f"\nDebug token request:")
+            print(f"Status code: {response.status_code}")
+            print(f"Response: {response.text}")
             
-            data = response.json()
-            access_token = data['access_token']
-            expires_in = data['expires_in']
-            
-            # Salvar token no .env
-            self._save_token_to_env(access_token, expires_in)
-            
-            return access_token
-            
-        except requests.exceptions.HTTPError as e:
-            print(f"\n❌ Error: {e.response.status_code}")
-            print(f"Response: {e.response.text}")
-            if e.response.status_code == 401:
-                print("\n🔧 Please check your Spotify Developer Dashboard settings:")
-                print("1. Go to https://developer.spotify.com/dashboard")
-                print("2. Select your app")
-                print("3. Click 'Settings'")
-                print("4. Verify these items:")
-                print(f"   - Redirect URI is exactly: {self.redirect_uri}")
-                print(f"   - Client ID and Secret are correct")
+            if response.status_code == 200:
+                data = response.json()
+                self.access_token = data['access_token']
+                
+                # Save tokens to env
+                env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+                with open(env_path, 'r') as f:
+                    lines = f.readlines()
+                
+                # Remove old tokens
+                lines = [l for l in lines if not l.startswith(('SPOTIFY_ACCESS_TOKEN=', 'SPOTIFY_REFRESH_TOKEN='))]
+                
+                # Add new tokens
+                lines.append(f'SPOTIFY_ACCESS_TOKEN={data["access_token"]}\n')
+                if 'refresh_token' in data:
+                    lines.append(f'SPOTIFY_REFRESH_TOKEN={data["refresh_token"]}\n')
+                
+                with open(env_path, 'w') as f:
+                    f.writelines(lines)
+                
+                print("\n✅ Autorização concluída!")
+                return self.access_token
+                
+            print(f"\n❌ Erro ao trocar código por tokens: {response.status_code}")
+            if response.text:
+                print("Mensagem:", response.text)
             return None
+            
         except Exception as e:
-            print(f"\n❌ Error: {str(e)}")
+            print(f"\n❌ Erro ao trocar código por tokens: {str(e)}")
             return None
+
+    def _get_access_token(self):
+        """Get access token from Spotify API."""
+        if not self.client_id or not self.client_secret:
+            print("\n❌ SPOTIFY_CLIENT_ID e SPOTIFY_CLIENT_SECRET precisam estar definidos no .env")
+            return None
+
+        # Tentar usar token existente
+        if self.access_token:
+            # Testar se o token ainda é válido
+            headers = {
+                'Authorization': f'Bearer {self.access_token}',
+                'Accept': 'application/json'
+            }
+            response = requests.get('https://api.spotify.com/v1/me', headers=headers)
+            if response.status_code == 200:
+                return self.access_token
+
+        # Token expirado ou não existe
+        # Primeiro tenta refresh token
+        refresh_token = os.getenv('SPOTIFY_REFRESH_TOKEN')
+        if refresh_token:
+            auth = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+            headers = {
+                'Authorization': f'Basic {auth}',
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            data = {
+                'grant_type': 'refresh_token',
+                'refresh_token': refresh_token
+            }
+            response = requests.post('https://accounts.spotify.com/api/token', headers=headers, data=data)
+            if response.status_code == 200:
+                data = response.json()
+                self.access_token = data['access_token']
+                os.environ['SPOTIFY_ACCESS_TOKEN'] = self.access_token
+                if 'refresh_token' in data:  # Nem sempre retorna um novo refresh token
+                    os.environ['SPOTIFY_REFRESH_TOKEN'] = data['refresh_token']
+                return self.access_token
+
+        # Se não tem refresh token ou falhou, inicia fluxo OAuth
+        return self._get_user_auth()
+
+    def _get_user_id(self):
+        """Get user ID from Spotify API."""
+        if not self.access_token:
+            self._get_access_token()
+            if not self.access_token:
+                return None
+
+        headers = {
+            'Authorization': f'Bearer {self.access_token}',
+            'Accept': 'application/json'
+        }
+
+        response = requests.get('https://api.spotify.com/v1/me', headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('id')
+            
+        print(f"\nErro ao obter user ID: {response.status_code}")
+        if response.text:
+            print("Mensagem:", response.text)
+        return None
 
     def get_user_info(self):
         """Get and display user profile."""
         if not self.access_token:
-            self.access_token = self._get_access_token()
+            self._get_access_token()
             if not self.access_token:
                 print("Failed to get access token")
                 return
@@ -292,7 +404,7 @@ class Plugin(PluginInterface):
     def search(self, query_type, query):
         """Search for tracks, artists, or albums."""
         if not self.access_token:
-            self.access_token = self._get_access_token()
+            self._get_access_token()
             if not self.access_token:
                 return
 
@@ -338,7 +450,7 @@ class Plugin(PluginInterface):
     def get_top_items(self, item_type):
         """Get user's top tracks or artists."""
         if not self.access_token:
-            self.access_token = self._get_access_token()
+            self._get_access_token()
             if not self.access_token:
                 return
 
@@ -368,7 +480,7 @@ class Plugin(PluginInterface):
     def get_recent_tracks(self):
         """Get user's recently played tracks."""
         if not self.access_token:
-            self.access_token = self._get_access_token()
+            self._get_access_token()
             if not self.access_token:
                 return
 
@@ -392,7 +504,7 @@ class Plugin(PluginInterface):
     def get_playlists(self):
         """Get user's playlists."""
         if not self.access_token:
-            self.access_token = self._get_access_token()
+            self._get_access_token()
             if not self.access_token:
                 return
 
@@ -568,7 +680,7 @@ class Plugin(PluginInterface):
     def get_following(self):
         """Get followed artists."""
         if not self.access_token:
-            self.access_token = self._get_access_token()
+            self._get_access_token()
             if not self.access_token:
                 return
 
@@ -590,7 +702,7 @@ class Plugin(PluginInterface):
     def get_recommendations(self):
         """Get track recommendations."""
         if not self.access_token:
-            self.access_token = self._get_access_token()
+            self._get_access_token()
             if not self.access_token:
                 return
 
@@ -672,6 +784,243 @@ class Plugin(PluginInterface):
             print(f"\nTotal tracks in playlist: {len(tracks)}")
             print("-" * 50)
 
+    def _get_client_token(self):
+        """Get client token from Spotify's clienttoken API."""
+        print("\n🔄 Obtendo client token...")
+        
+        try:
+            # Headers exatos usados pelo Web Player
+            data = {
+                "client_data": {
+                    "client_version": "1.2.53.4.ga8485c87",
+                    "client_id": "d8a5ed958d274c2e8ee717e6a4b0971d",  # Web Player Client ID
+                    "js_sdk_data": {
+                        "device_brand": "unknown",
+                        "device_model": "desktop",
+                        "os": "Linux",
+                        "os_version": "unknown",
+                        "device_id": str(uuid.uuid4()),
+                        "device_type": "computer"
+                    }
+                }
+            }
+
+            headers = {
+                'accept': 'application/json',
+                'accept-language': 'en',
+                'app-platform': 'WebPlayer',
+                'content-type': 'application/json',
+                'origin': 'https://open.spotify.com',
+                'referer': 'https://open.spotify.com/',
+                'sec-ch-ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Linux"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-site',
+                'spotify-app-version': '1.2.53.4.ga8485c87',
+                'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+            }
+
+            response = requests.post(
+                "https://clienttoken.spotify.com/v1/clienttoken",
+                headers=headers,
+                json=data
+            )
+
+            if response.status_code == 200:
+                token_data = response.json()
+                if 'granted_token' in token_data:
+                    client_token = token_data['granted_token']
+                    if isinstance(client_token, dict):
+                        client_token = client_token.get('token', '')
+                    print("✅ Client token obtido com sucesso!")
+                    os.environ['SPOTIFY_CLIENT_TOKEN'] = client_token
+                    return client_token
+            
+            print(f"\n❌ Erro ao obter client token: {response.status_code}")
+            if response.text:
+                print("Mensagem:", response.text)
+            return None
+            
+        except Exception as e:
+            print(f"\n❌ Erro ao obter client token: {str(e)}")
+            return None
+
+    def _get_web_access_token(self, username, password):
+        """Get access token through Web Player login."""
+        print("\n🔄 Fazendo login no Web Player...")
+        
+        try:
+            session = requests.Session()
+            
+            # Primeiro request - Login com email/senha
+            login_url = "https://accounts.spotify.com/login/password"
+            
+            headers = {
+                'accept': 'application/json',
+                'accept-language': 'en-US,en;q=0.9',
+                'content-type': 'application/json',
+                'origin': 'https://accounts.spotify.com',
+                'referer': 'https://accounts.spotify.com/en/login',
+                'sec-ch-ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Linux"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+                'spotify-app-version': '1.2.53.4.ga8485c87',
+                'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+            }
+            
+            data = {
+                'username': username,
+                'password': password,
+                'remember': True
+            }
+            
+            response = session.post(login_url, headers=headers, json=data)
+            
+            if response.status_code != 200:
+                print(f"\n❌ Erro no login: {response.status_code}")
+                if response.text:
+                    print("Mensagem:", response.text)
+                return None
+                
+            # Segundo request - Obter token de acesso
+            token_url = "https://open.spotify.com/get_access_token"
+            
+            headers = {
+                'accept': 'application/json',
+                'accept-language': 'en-US,en;q=0.9',
+                'app-platform': 'WebPlayer',
+                'origin': 'https://open.spotify.com',
+                'referer': 'https://open.spotify.com/',
+                'sec-ch-ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Linux"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-site',
+                'spotify-app-version': '1.2.53.4.ga8485c87',
+                'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+            }
+            
+            params = {
+                'reason': 'transport',
+                'productType': 'web_player'
+            }
+            
+            response = session.get(token_url, headers=headers, params=params)
+            
+            if response.status_code == 200:
+                data = response.json()
+                access_token = data.get('accessToken')
+                if access_token:
+                    print("✅ Token de acesso obtido com sucesso!")
+                    return access_token
+                    
+            print(f"\n❌ Erro ao obter token de acesso: {response.status_code}")
+            if response.text:
+                print("Mensagem:", response.text)
+            return None
+            
+        except Exception as e:
+            print(f"\n❌ Erro no processo de login: {str(e)}")
+            return None
+
+    def set_display_name_web(self, new_name):
+        """Change display name through Spotify's Web Player API."""
+        # Pegar credenciais do .env
+        username = os.getenv('SPOTIFY_USERNAME')
+        password = os.getenv('SPOTIFY_PASSWORD')
+        
+        if not username or not password:
+            print("\n❌ Credenciais não encontradas!")
+            print("Por favor, adicione SPOTIFY_USERNAME e SPOTIFY_PASSWORD ao seu arquivo .env")
+            return False
+        
+        # Fazer login e obter token de acesso do Web Player
+        access_token = self._get_web_access_token(username, password)
+        if not access_token:
+            print("\n❌ Não foi possível fazer login no Web Player")
+            return False
+            
+        # Obter client token
+        if not self.client_token:
+            print("\n🔄 Obtendo client token...")
+            self.client_token = self._get_client_token()
+            if not self.client_token:
+                print("\n❌ Não foi possível obter o client token")
+                return False
+            os.environ['SPOTIFY_CLIENT_TOKEN'] = self.client_token
+
+        # Get user ID
+        user_id = self._get_user_id()
+        if not user_id:
+            print("\n❌ Não foi possível obter seu ID do Spotify")
+            return False
+
+        session = requests.Session()
+        
+        print("\n🔄 Iniciando processo de alteração de nome...")
+        
+        # Headers exatos do Web Player
+        headers = {
+            'accept': 'application/json',
+            'accept-language': 'en',
+            'app-platform': 'WebPlayer',
+            'authorization': f'Bearer {access_token}',  # Usando token do Web Player
+            'client-token': self.client_token,
+            'content-type': 'application/json',
+            'origin': 'https://open.spotify.com',
+            'referer': 'https://open.spotify.com/',
+            'sec-ch-ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Linux"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+            'spotify-app-version': '1.2.53.4.ga8485c87',
+            'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+        }
+
+        # Endpoint do Web Player para alterar nome
+        profile_url = f"https://spclient.wg.spotify.com/identity/v3/profile/{user_id}"
+        
+        # Dados no formato do Web Player
+        update_data = {
+            "displayName": new_name
+        }
+        
+        print(f"\nDebug info:")
+        print(f"User ID: {user_id}")
+        print(f"Client Token: {self.client_token[:30]}...")
+        print(f"URL: {profile_url}")
+        print(f"Data: {json.dumps(update_data)}")
+        
+        # Tentar atualizar o perfil
+        response = session.put(profile_url, headers=headers, json=update_data)
+        
+        if response.status_code in [200, 204]:
+            print(f"\n✅ Nome alterado com sucesso para: {new_name}")
+            time.sleep(2)  # Esperar propagação
+            self.get_user_info()  # Mostrar perfil atualizado
+            return True
+            
+        print(f"\n❌ Erro ao alterar nome: {response.status_code}")
+        if response.text:
+            print("Mensagem:", response.text)
+            
+        if response.status_code == 403:
+            print("\nDica: O erro 403 pode indicar que o client token está inválido.")
+            print("Tente limpar o SPOTIFY_CLIENT_TOKEN do seu .env e tentar novamente.")
+            print("Ou pode ser necessário reautorizar. Tente limpar SPOTIFY_ACCESS_TOKEN e SPOTIFY_REFRESH_TOKEN também.")
+        
+        print("\nSe a alteração automática falhar, você pode alterar manualmente em:")
+        print("https://open.spotify.com/")
+        return False
+
     def test(self):
         """Run basic plugin test."""
         print("Testing Spotify plugin...")
@@ -679,56 +1028,76 @@ class Plugin(PluginInterface):
         return True
 
     def run(self, command: str, *args, **kwargs):
-        """Execute plugin command."""
-        if not command:
-            return self.list_commands()
-            
-        # Always check token before running commands
+        """Execute a specific plugin command."""
+        # Sempre verificar/renovar token antes de executar comandos
         if not self._is_token_valid():
-            self._get_access_token()
+            if not self._get_access_token():
+                print("\n❌ Não foi possível obter autorização")
+                return
             
-        if command == "me":
-            return self.get_user_info()
-        elif command == "search" and len(args) >= 2:
-            return self.search(args[0], " ".join(args[1:]))
-        elif command == "top" and args:
-            return self.get_top_items(args[0])
-        elif command == "recent":
-            return self.get_recent_tracks()
+        if command == "set-name":
+            if not args:
+                print("Usage: set-name [new_name]")
+                return
+            new_name = " ".join(args)  # Permite nomes com espaços
+            self.set_display_name_web(new_name)
+        elif command == "me":
+            self.get_user_info()
+        elif command == "test":
+            self.test()
         elif command == "playlists":
-            return self.get_playlists()
-        elif command == "playlist" and args:
-            return self.get_playlist(args[0])
-        elif command == "create-playlist" and len(args) >= 1:
+            self.get_playlists()
+        elif command == "playlist":
+            if not args:
+                print("Usage: playlist [playlist_id]")
+                return
+            self.get_playlist(args[0])
+        elif command == "search":
+            if len(args) < 2:
+                print("Usage: search [type] [query] (types: track, artist, album)")
+                return
+            self.search(args[0], " ".join(args[1:]))
+        elif command == "top":
+            if not args:
+                print("Usage: top [type] (types: tracks, artists)")
+                return
+            self.get_top_items(args[0])
+        elif command == "recent":
+            self.get_recent_tracks()
+        elif command == "create-playlist":
+            if not args:
+                print("Usage: create-playlist [name] [description]")
+                return
             name = args[0]
             description = " ".join(args[1:]) if len(args) > 1 else None
-            return self.create_playlist(name, description)
-        elif command == "edit-playlist" and len(args) >= 2:
-            playlist_id = args[0]
-            name = args[1]
-            description = " ".join(args[2:]) if len(args) > 2 else None
-            return self.edit_playlist(playlist_id, name, description)
-        elif command == "add-to-playlist" and len(args) >= 2:
-            playlist_id = args[0]
-            track_ids = args[1:]
-            return self.add_tracks_to_playlist(playlist_id, track_ids)
+            self.create_playlist(name, description)
+        elif command == "edit-playlist":
+            if len(args) < 3:
+                print("Usage: edit-playlist [playlist_id] [name] [description]")
+                return
+            self.edit_playlist(args[0], args[1], " ".join(args[2:]))
+        elif command == "add-to-playlist":
+            if len(args) < 2:
+                print("Usage: add-to-playlist [playlist_id] [track_id1] [track_id2] ...")
+                return
+            self.add_tracks_to_playlist(args[0], args[1:])
         elif command == "following":
-            return self.get_following()
+            self.get_following()
         elif command == "recommendations":
-            return self.get_recommendations()
-        elif command == "test":
-            return self.test()
+            self.get_recommendations(*args)
         elif command == "charts":
-            country = args[0] if args else "brazil"
-            limit = args[1] if len(args) > 1 else 10
-            return self.get_charts(country, limit)
+            country = args[0] if args else "global"
+            limit = int(args[1]) if len(args) > 1 else 50
+            self.get_charts(country, limit)
         else:
-            return f"Unknown command: {command}\nUse 'spotify' to see available commands."
+            print(f"Unknown command: {command}")
+            self.list_commands()
 
     def list_commands(self):
+        """List all available commands."""
         print("\nAvailable commands:")
         for cmd, desc in self._commands.items():
-            print(f"  - {cmd}: {desc}")
+            print(f"  {cmd}: {desc}")
 
 def plugin():
     """Create plugin instance."""
